@@ -1,12 +1,16 @@
 import 'dart:io';
 import 'dart:developer' as devtools;
-import 'package:image/image.dart' as imglib;
+import 'dart:typed_data';
+import 'package:image/image.dart' as img;
 import 'package:flutter/material.dart';
 import 'package:flutter_tflite/flutter_tflite.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:tomatomaturityapp/screens/loaderscreen.dart';
 import 'package:tomatomaturityapp/utils/appcolor.dart';
 import 'package:tomatomaturityapp/widgets/appiconbutton.dart';
+
+// ImageNet mean values for zero-centering
+const imageNetMean = [123.68, 116.779, 103.939];
 
 class HomeScreen extends StatefulWidget {
   static const String id = "home_screen";
@@ -28,17 +32,48 @@ class _HomeScreenState extends State<HomeScreen> {
     _tfLteInit();
   }
 
-  // Load the model
+// Function to preprocess the image
+  Uint8List preprocessImage(Uint8List imageData) {
+    // Decode the image
+    img.Image image = img.decodeImage(imageData)!;
+
+    // Resize image to 224x224 pixels
+    img.Image resizedImage = img.copyResize(image, width: 224, height: 224);
+
+    // Convert the image from RGB to BGR and zero-center with ImageNet means
+    List<double> pixels = [];
+    for (int y = 0; y < resizedImage.height; y++) {
+      for (int x = 0; x < resizedImage.width; x++) {
+        int pixel = resizedImage.getPixel(x, y);
+        double r = img.getRed(pixel).toDouble();
+        double g = img.getGreen(pixel).toDouble();
+        double b = img.getBlue(pixel).toDouble();
+
+        // Zero-center with ImageNet means
+        b -= imageNetMean[2];
+        g -= imageNetMean[1];
+        r -= imageNetMean[0];
+
+        // Add the BGR values to the list
+        pixels.add(b);
+        pixels.add(g);
+        pixels.add(r);
+      }
+    }
+
+    // Convert the list to Float32List
+    Float32List float32Pixels = Float32List.fromList(pixels);
+    return float32Pixels.buffer.asUint8List();
+  }
+
   Future<void> _tfLteInit() async {
     try {
       String? res = await Tflite.loadModel(
-        model: "assets/model/ResNet50_DIAMANTE.tflite",
+        model: "assets/model/ResNet50_DIAMANTE_60_20_20.tflite",
         labels: "assets/label/labels.txt",
-        numThreads: 1, // defaults to 1
-        isAsset:
-            true, // defaults to true, set to false to load resources outside assets
-        useGpuDelegate:
-            false, // defaults to false, set to true to use GPU delegate
+        numThreads: 1,
+        isAsset: true,
+        useGpuDelegate: false,
       );
       if (res == null) {
         throw Exception("Failed to load model");
@@ -51,21 +86,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Function to resize image
-  String resizedImage(File file) {
-    var rawBytes = file.readAsBytesSync();
-    var image = imglib.decodeImage(rawBytes);
-    // Resize image to 224x224 pixels
-    var resizedImage = imglib.copyResize(image!, width: 224, height: 224);
-    // Save resized image to a temporary file
-    var tempDir = Directory.systemTemp;
-    var tempFile = File('${tempDir.path}/resized_image.jpg');
-    tempFile.writeAsBytesSync(imglib.encodeJpg(resizedImage));
-    // Return the path to the saved resized image
-    return tempFile.path;
-  }
-
-  // Function to upload picture from the local file
   Future<void> pickImageGallery() async {
     if (!isModelLoaded) return;
 
@@ -76,17 +96,14 @@ class _HomeScreenState extends State<HomeScreen> {
     if (image == null) return;
 
     var imageMap = File(image.path);
-    // Call the resizeImage function to resize the image input
-    var resImage = resizedImage(imageMap);
 
     setState(() {
       filePath = imageMap;
     });
 
-    await runInference(resImage);
+    await runInference(imageMap.path);
   }
 
-  // Function to capture picture through device camera
   Future<void> pickImageCamera() async {
     if (!isModelLoaded) return;
 
@@ -97,23 +114,24 @@ class _HomeScreenState extends State<HomeScreen> {
     if (image == null) return;
 
     var imageMap = File(image.path);
-    // Call the resizeImage function to resize the image input
-    var resImage = resizedImage(imageMap);
 
     setState(() {
       filePath = imageMap;
     });
 
-    await runInference(resImage);
+    await runInference(imageMap.path);
   }
 
-  // Function to run model inference
+// Function to run model inference
   Future<void> runInference(String imagePath) async {
-    var recognitions = await Tflite.runModelOnImage(
-      path: imagePath,
-      numResults: 8,
-      threshold: 0.5,
-      asynch: true,
+    File imageFile = File(imagePath);
+    Uint8List imageData = imageFile.readAsBytesSync();
+    Uint8List preprocessedData = preprocessImage(imageData);
+
+    var recognitions = await Tflite.runModelOnBinary(
+      binary: preprocessedData,
+      numResults: 6,
+      threshold: 0.3,
     );
 
     if (recognitions != null && recognitions.isNotEmpty) {
@@ -130,7 +148,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     Navigator.pushNamed(
-      // ignore: use_build_context_synchronously
       context,
       ScanningImageScreen.id,
       arguments: {
